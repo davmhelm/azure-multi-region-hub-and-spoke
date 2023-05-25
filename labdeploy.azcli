@@ -1,0 +1,254 @@
+## Prerequisites
+## Login
+# az login
+## Select subscription to deploy in
+# az account list -o table
+# az account set -s "subcription_name"
+
+#####################
+## Begin Variables ##
+#####################
+
+rgname=hub-and-spoke-multiregion-lab-rg
+
+site1_region=westcentralus
+site2_region=centralus
+site1_summaryCidr=10.100.0.0/16
+site2_summaryCidr=10.200.0.0/16
+
+site1_vnet_hub_name=site1-hub-vnet
+site1_vnet_hub_addressSpaceCidr=10.100.0.0/22
+site1_vnet_hub_AzureFirewallSubnetCidr=10.100.0.0/24
+site1_vnet_hub_VmSubnetCidr=10.100.1.0/24
+site1_vnet_hub_azfw_name=site1-azfw
+
+site1_vnet_spoke_name=site1-spoke1-vnet
+site1_vnet_spoke_addressSpaceCidr=10.100.4.0/24
+site1_vnet_spoke_VmSubnetCidr=10.100.4.0/26
+
+site2_vnet_hub_name=site2-hub-vnet
+site2_vnet_hub_addressSpaceCidr=10.200.0.0/22
+site2_vnet_hub_AzureFirewallSubnetCidr=10.200.0.0/24
+site2_vnet_hub_VmSubnetCidr=10.200.1.0/24
+site2_vnet_hub_azfw_name=site2-azfw
+
+site2_vnet_spoke_name=site2-spoke1-vnet
+site2_vnet_spoke_addressSpaceCidr=10.200.4.0/24
+site2_vnet_spoke_VmSubnetCidr=10.200.4.0/26
+
+# Define client VMs
+site1_vm_name=Site1Vm1
+site1_vm_size=Standard_B2ms
+site1_vm_staticIp=10.100.4.4
+
+site2_vm_name=Site2Vm1
+site2_vm_size=Standard_B2ms
+site2_vm_staticIp=10.200.4.4
+
+# Username and password on all VMs
+vm_username=azureuser
+ vm_password=+Please_Ch4ng3_M3!
+
+# Define storage accounts for VM boot diagnostics and serial console
+# recommend keeping this prefix between 1 and 12 characters 
+storage_prefix=diagstorage
+
+###################
+## End Variables ##
+###################
+
+######################
+## Begin Deployment ##
+######################
+
+# Generate random suffixes for diagnostic logging storage used by Azure serial console
+lowerbound=10000
+upperbound=9999999999
+range=$(($upperbound-$lowerbound+1))
+rand1=$(($(($(($RANDOM**2+$RANDOM))%$range))+$lowerbound))
+rand2=$(($(($(($RANDOM**2+$RANDOM))%$range))+$lowerbound))
+site1_storageAccount_name=$storage_prefix$rand1
+site2_storageAccount_name=$storage_prefix$rand2
+
+# Register features for helpful AzFW logging
+echo -n "*** $(date +%T%z) Validating status of Azure Firewall Structured Logs and TCP Connection Logging features"
+azFwStructuredLogState=$(az feature registration create --name AFWEnableStructuredLogs --namespace Microsoft.Network --query 'properties.state' --output tsv)
+azFwTcpConnectionLoggingState=$(az feature registration create --name AFWEnableTcpConnectionLogging --namespace Microsoft.Network --query 'properties.state' --output tsv)
+
+timeout=0
+while [[ ( $azFwStructuredLogState != 'Registered' || $azFwTcpConnectionLoggingState != 'Registered' ) && $timeout -le 60 ]]; do
+    echo -n "."
+    azFwStructuredLogState=$(az feature registration show --name AFWEnableStructuredLogs --provider-namespace Microsoft.Network --query 'properties.state' --output tsv)
+    azFwTcpConnectionLoggingState=$(az feature registration show --name AFWEnableTcpConnectionLogging --provider-namespace Microsoft.Network --query 'properties.state' --output tsv)
+    sleep 10
+    ((timeout+=10))
+done
+
+# Re-register Microsoft.Network provider if needed
+if [[ $timeout -eq 0 ]]; then
+    echo -e "\n*** $(date +%T%z) Features registered already, proceeding..."
+elif [[ $timeout -lt 600 ]]; then
+    echo -e "\n*** $(date +%T%z) Features successfully registered, re-egistering Microsoft.Network resource provider..."
+    az provider register --namespace Microsoft.Network --wait
+else
+    # Timeout exceeded, log to stderr
+    echo "Could not enable Azure Firewall Structured Logs or TCP Connection Logging features after $timeout seconds" >&2
+fi
+
+# Create Resource group and base networking
+echo "*** $(date +%T%z) Creating resource group $rgname and base networking in $site1_region and $site2_region"
+az group create --name $rgname --location $site1_region --output none
+
+az network vnet create --name $site1_vnet_hub_name --resource-group $rgname --location $site1_region --address-prefixes $site1_vnet_hub_addressSpaceCidr --subnet-name AzureFirewallSubnet --subnet-prefix $site1_vnet_hub_AzureFirewallSubnetCidr --output none
+az network vnet create --name $site2_vnet_hub_name --resource-group $rgname --location $site2_region --address-prefixes $site2_vnet_hub_addressSpaceCidr --subnet-name AzureFirewallSubnet --subnet-prefix $site2_vnet_hub_AzureFirewallSubnetCidr --output none
+
+# Optional, if you need to check effective routes applied to the AzureFirewallSubnet, then deploy a VM in this subnet and apply the corresponding route table
+az network vnet subnet create --name VmSubnet --vnet-name $site1_vnet_hub_name --resource-group $rgname --address-prefix $site1_vnet_hub_VmSubnetCidr --output none
+az network vnet subnet create --name VmSubnet --vnet-name $site2_vnet_hub_name --resource-group $rgname --address-prefix $site2_vnet_hub_VmSubnetCidr --output none
+
+az network vnet create --name $site1_vnet_spoke_name --resource-group $rgname --location $site1_region --address-prefixes $site1_vnet_spoke_addressSpaceCidr --subnet-name VmSubnet --subnet-prefix $site1_vnet_spoke_VmSubnetCidr --output none
+az network vnet create --name $site2_vnet_spoke_name --resource-group $rgname --location $site2_region --address-prefixes $site2_vnet_spoke_addressSpaceCidr --subnet-name VmSubnet --subnet-prefix $site2_vnet_spoke_VmSubnetCidr --output none
+
+# Peer VNets
+echo "*** $(date +%T%z) Creating vnet peerings in $site1_region and $site2_region"
+# Spokes to regional hubs
+az network vnet peering create --name site1hub-to-spoke --resource-group $rgname --vnet-name $site1_vnet_hub_name --remote-vnet $site1_vnet_spoke_name --allow-forwarded-traffic --allow-vnet-access --output none
+az network vnet peering create --name spoke-to-site1hub --resource-group $rgname --vnet-name $site1_vnet_spoke_name --remote-vnet $site1_vnet_hub_name --allow-forwarded-traffic --allow-vnet-access --output none
+az network vnet peering create --name site2hub-to-spoke --resource-group $rgname --vnet-name $site2_vnet_hub_name --remote-vnet $site2_vnet_spoke_name --allow-forwarded-traffic --allow-vnet-access --output none
+az network vnet peering create --name spoke-to-site2hub --resource-group $rgname --vnet-name $site2_vnet_spoke_name --remote-vnet $site2_vnet_hub_name --allow-forwarded-traffic --allow-vnet-access --output none
+
+# Hubs to each other
+az network vnet peering create --name site1hub-to-site2hub --resource-group $rgname --vnet-name $site1_vnet_hub_name --remote-vnet $site2_vnet_hub_name --allow-forwarded-traffic --allow-vnet-access --output none
+az network vnet peering create --name site2hub-to-site1hub --resource-group $rgname --vnet-name $site2_vnet_hub_name --remote-vnet $site1_vnet_hub_name --allow-forwarded-traffic --allow-vnet-access --output none
+
+# Create Firewalls in hubs
+echo "*** $(date +%T%z) Creating Azure Firewalls in $site1_region and $site2_region"
+az network public-ip create --name ${site1_vnet_hub_azfw_name}-pip --resource-group $rgname --location $site1_region --idle-timeout 4 --sku Standard --output none
+az network public-ip create --name ${site2_vnet_hub_azfw_name}-pip --resource-group $rgname --location $site2_region --idle-timeout 4 --sku Standard --output none
+
+az network firewall create --name $site1_vnet_hub_azfw_name --resource-group $rgname --location $site1_region --vnet-name $site1_vnet_hub_name --conf-name DefaultPublicIpConfiguration --public-ip ${site1_vnet_hub_azfw_name}-pip --tier Standard --sku AZFW_VNet --output none
+site1_fw_privateIpAddress=$(az network firewall ip-config list --firewall-name $site1_vnet_hub_azfw_name --resource-group $rgname --query "[?name=='DefaultPublicIpConfiguration'].privateIpAddress" --output tsv)
+
+az network firewall create --name $site2_vnet_hub_azfw_name --resource-group $rgname --location $site2_region --vnet-name $site2_vnet_hub_name --conf-name DefaultPublicIpConfiguration --public-ip ${site2_vnet_hub_azfw_name}-pip --tier Standard --sku AZFW_VNet --output none
+site2_fw_privateIpAddress=$(az network firewall ip-config list --firewall-name $site2_vnet_hub_azfw_name --resource-group $rgname --query "[?name=='DefaultPublicIpConfiguration'].privateIpAddress" --output tsv)
+
+az network firewall network-rule create --name AllowPrivateSourceToAny --firewall-name $site1_vnet_hub_azfw_name --resource-group $rgname --collection-name DefaultNetworkRuleCollection --source-addresses 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 --destination-addresses '*' --destination-ports '*' --priority 200 --protocols Any --action Allow --output none
+az network firewall network-rule create --name AllowPrivateSourceToAny --firewall-name $site2_vnet_hub_azfw_name --resource-group $rgname --collection-name DefaultNetworkRuleCollection --source-addresses 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 --destination-addresses '*' --destination-ports '*' --priority 200 --protocols Any --action Allow --output none
+
+# Configure diagnostic logging
+echo -e "*** $(date +%T%z) Configure diagnostic logging on firewalls in $site1_region and $site2_region"
+export AZURE_CORE_USE_COMMAND_INDEX=False # Work around https://github.com/Azure/azure-cli/issues/26297
+workspace_id=$(az monitor log-analytics workspace create --name LaWorkspace --resource-group $rgname --location $site1_region --query 'id' --output tsv)
+site1_fw_id=$(az network firewall show --name $site1_vnet_hub_azfw_name --resource-group $rgname --query 'id' --output tsv)
+site2_fw_id=$(az network firewall show --name $site2_vnet_hub_azfw_name --resource-group $rgname --query 'id' --output tsv)
+
+az monitor diagnostic-settings create --name 'LegacyToLogAnalytics' --resource $site1_fw_id --workspace $workspace_id \
+   --logs "[{\"category\":\"AzureFirewallApplicationRule\",\"Enabled\":true}, {\"category\":\"AzureFirewallNetworkRule\",\"Enabled\":true}, {\"category\":\"AzureFirewallDnsProxy\",\"Enabled\":true}]" \
+   --metrics "[{\"category\": \"AllMetrics\",\"enabled\": true}]" --output none
+
+az monitor diagnostic-settings create --name 'LegacyToLogAnalytics' --resource $site2_fw_id --workspace $workspace_id \
+   --logs "[{\"category\":\"AzureFirewallApplicationRule\",\"Enabled\":true}, {\"category\":\"AzureFirewallNetworkRule\",\"Enabled\":true}, {\"category\":\"AzureFirewallDnsProxy\",\"Enabled\":true}]" \
+   --metrics "[{\"category\": \"AllMetrics\",\"enabled\": true}]" --output none
+
+az monitor diagnostic-settings create --name 'ResourceSpecificToLogAnalytics' --resource $site1_fw_id --workspace $workspace_id --export-to-resource-specific \
+  --logs "[{\"category\":\"AZFWNetworkRule\",\"Enabled\":true}, {\"category\":\"AZFWApplicationRule\",\"Enabled\":true}, {\"category\":\"AZFWNatRule\",\"Enabled\":true}, {\"category\":\"AZFWDnsQuery\",\"Enabled\":true}, {\"category\":\"AZFWFqdnResolveFailure\",\"Enabled\":true}, {\"category\":\"AZFWFlowTrace\",\"Enabled\":true}]" \
+  --output none
+
+az monitor diagnostic-settings create --name 'ResourceSpecificToLogAnalytics' --resource $site2_fw_id --workspace $workspace_id --export-to-resource-specific \
+  --logs "[{\"category\":\"AZFWNetworkRule\",\"Enabled\":true}, {\"category\":\"AZFWApplicationRule\",\"Enabled\":true}, {\"category\":\"AZFWNatRule\",\"Enabled\":true}, {\"category\":\"AZFWDnsQuery\",\"Enabled\":true}, {\"category\":\"AZFWFqdnResolveFailure\",\"Enabled\":true}, {\"category\":\"AZFWFlowTrace\",\"Enabled\":true}]" \
+  --output none
+
+unset AZURE_CORE_USE_COMMAND_INDEX # Remove workaround for https://github.com/Azure/azure-cli/issues/26297
+
+# Create route tables and routes
+# TODO: consider replacing hard-coded resource names with ones constructed from variables
+echo "*** $(date +%T%z) Creating route tables to use Azure Firewalls in $site1_region and $site2_region"
+az network route-table create --name Site1Hub-Site2Hub-rt --resource-group $rgname --location $site1_region --output none
+az network route-table create --name Site2Hub-Site1Hub-rt --resource-group $rgname --location $site2_region --output none
+
+az network route-table create --name Site1Spoke-rt --resource-group $rgname --location $site1_region --disable-bgp-route-propagation true --output none
+az network route-table create --name Site2Spoke-rt --resource-group $rgname --location $site2_region --disable-bgp-route-propagation true --output none
+
+az network route-table route create --name To-Site2-via-FW --route-table-name Site1Hub-Site2Hub-rt --resource-group $rgname --address-prefix $site2_summaryCidr --next-hop-type VirtualAppliance --next-hop-ip-address $site2_fw_privateIpAddress --no-wait --output none
+az network route-table route create --name DefaultToInternet --route-table-name Site1Hub-Site2Hub-rt --resource-group $rgname --address-prefix 0.0.0.0/0 --next-hop-type Internet --no-wait --output none
+az network route-table route create --name To-Site1-via-FW --route-table-name Site2Hub-Site1Hub-rt --resource-group $rgname --address-prefix $site1_summaryCidr --next-hop-type VirtualAppliance --next-hop-ip-address $site1_fw_privateIpAddress --no-wait --output none
+az network route-table route create --name DefaultToInternet --route-table-name Site2Hub-Site1Hub-rt --resource-group $rgname --address-prefix 0.0.0.0/0 --next-hop-type Internet --no-wait --output none
+
+az network route-table route create --name Default-via-FW --route-table-name Site1Spoke-rt --resource-group $rgname --address-prefix 0.0.0.0/0 --next-hop-type VirtualAppliance  --next-hop-ip-address $site1_fw_privateIpAddress --no-wait --output none
+az network route-table route create --name Default-via-FW --route-table-name Site2Spoke-rt --resource-group $rgname --address-prefix 0.0.0.0/0 --next-hop-type VirtualAppliance  --next-hop-ip-address $site2_fw_privateIpAddress --no-wait --output none
+
+az network vnet subnet update --name AzureFirewallSubnet --vnet-name $site1_vnet_hub_name --resource-group $rgname --route-table Site1Hub-Site2Hub-rt --output none
+az network vnet subnet update --name AzureFirewallSubnet --vnet-name $site2_vnet_hub_name --resource-group $rgname --route-table Site2Hub-Site1Hub-rt --output none
+
+# Create NSGs
+echo "*** $(date +%T%z) Creating default NSGs to apply to Spoke VNet subnets in $site1_region and $site2_region"
+az network nsg create --name Site1-VmSubnet-nsg --resource-group $rgname --location $site1_region --output none
+az network nsg create --name Site2-VmSubnet-nsg --resource-group $rgname --location $site2_region --output none
+
+# Update subnets
+echo "*** $(date +%T%z) Applying route tables and NSGs to Spoke VNet subnets in $site1_region and $site2_region"
+az network vnet subnet update --name VmSubnet --vnet-name $site1_vnet_spoke_name --resource-group $rgname --route-table Site1Spoke-rt --network-security-group Site1-VmSubnet-nsg --output none
+az network vnet subnet update --name VmSubnet --vnet-name $site2_vnet_spoke_name --resource-group $rgname --route-table Site2Spoke-rt  --network-security-group Site2-VmSubnet-nsg --output none
+
+# Deploy client VMs
+echo -e "*** $(date +%T%z) Creating client VMs in $site1_region and $site2_region"
+
+# Create storage accounts for serial console access
+site1_storageUri=$(az storage account create --name $site1_storageAccount_name --resource-group $rgname --location $site1_region --kind StorageV2 --sku Standard_LRS --query "primaryEndpoints.blob" --allow-blob-public-access false --output tsv)
+site2_storageUri=$(az storage account create --name $site2_storageAccount_name --resource-group $rgname --location $site2_region --kind StorageV2 --sku Standard_LRS --query "primaryEndpoints.blob" --allow-blob-public-access false --output tsv)
+
+# Create network interfaces
+az network nic create --name ${site1_vm_name}-nic --resource-group $rgname --location $site1_region --vnet-name $site1_vnet_spoke_name --subnet VmSubnet --private-ip-address $site1_vm_staticIp --output none
+az network nic create --name ${site2_vm_name}-nic --resource-group $rgname --location $site2_region --vnet-name $site2_vnet_spoke_name --subnet VmSubnet --private-ip-address $site2_vm_staticIp --output none
+
+# Create VMs
+az vm create --name $site1_vm_name --resource-group $rgname --location $site1_region --size $site1_vm_size --nics ${site1_vm_name}-nic --image Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest --admin-username $vm_username --admin-password $vm_password --boot-diagnostics-storage $site1_storageUri --output none
+az vm create --name $site2_vm_name --resource-group $rgname --location $site2_region --size $site2_vm_size --nics ${site2_vm_name}-nic --image Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest --admin-username $vm_username --admin-password $vm_password --boot-diagnostics-storage $site2_storageUri --output none
+
+# Install network tools on Linux VMs, sets up an HTTP listener on TCP 80
+az vm extension set --name CustomScript --resource-group $rgname --vm-name $site1_vm_name --publisher Microsoft.Azure.Extensions --protected-settings "{\"fileUris\": [\"https://raw.githubusercontent.com/davmhelm/azure-vm-net-tools/main/script/nettools.sh\"],\"commandToExecute\": \"./nettools.sh\"}" --no-wait --output none
+az vm extension set --name CustomScript --resource-group $rgname --vm-name $site2_vm_name --publisher Microsoft.Azure.Extensions --protected-settings "{\"fileUris\": [\"https://raw.githubusercontent.com/davmhelm/azure-vm-net-tools/main/script/nettools.sh\"],\"commandToExecute\": \"./nettools.sh\"}" --no-wait --output none
+
+# Install Network Watcher Agent on Linux VMs for later connectivity testing
+az vm extension set --name NetworkWatcherAgentLinux --resource-group $rgname --vm-name $site1_vm_name --publisher Microsoft.Azure.NetworkWatcher --no-wait --output none
+az vm extension set --name NetworkWatcherAgentLinux --resource-group $rgname --vm-name $site2_vm_name --publisher Microsoft.Azure.NetworkWatcher --no-wait --output none
+
+# Wait 2 minutes for things to settle down
+echo -e "*** $(date +%T%z) Waiting 5 minutes for deployments to settle down in $site1_region and $site2_region..."
+sleep 300
+
+# Validate reachability between VMs in site1 spoke and site2 spoke
+site1_vm_id=$(az vm show --name $site1_vm_name --resource-group $rgname --query "id" --output tsv)
+site2_vm_id=$(az vm show --name $site2_vm_name --resource-group $rgname --query "id" --output tsv)
+# Azure Network Watcher 
+# https://docs.microsoft.com/en-us/azure/network-watcher/network-watcher-connectivity-cli
+# https://docs.microsoft.com/en-us/azure/network-watcher/network-watcher-connectivity-portal
+echo -e "\n"
+echo -e "*** $(date +%T%z) Reachability Tests\n"
+echo -e "*** $(date +%T%z) Testing ICMP reachability from $site1_vm_name in $site1_region to $site2_vm_name in $site2_region"
+az network watcher test-connectivity --source-resource $site1_vm_id --dest-address $site2_vm_staticIp --protocol icmp --output table
+
+echo -e "\n*** $(date +%T%z) Testing HTTP reachability from $site1_vm_name in $site1_region to $site2_vm_name in $site2_region"
+az network watcher test-connectivity --source-resource $site1_vm_id --dest-address $site2_vm_staticIp --protocol http --output table
+
+echo -e "\n*** $(date +%T%z) Testing ICMP reachability from $site2_vm_name in $site2_region to $site1_vm_name in $site1_region"
+az network watcher test-connectivity --source-resource $site2_vm_id --dest-address $site1_vm_staticIp --protocol icmp --output table
+
+echo -e "\n*** $(date +%T%z) Testing HTTP reachability from $site2_vm_name in $site2_region to $site1_vm_name in $site1_region"
+az network watcher test-connectivity --source-resource $site2_vm_id --dest-address $site1_vm_staticIp --protocol http --output table
+
+echo -e "\n*** $(date +%T%z) Lab build complete! To remote into either of the VMs for further testing, you can use serial console:"
+echo -e "\taz serial-console connect --name $site1_vm_name --resource-group $rgname"
+echo -e "\taz serial-console connect --name $site2_vm_name --resource-group $rgname"
+echo -e "\nImportant IP addresses to note:"
+echo -e "\tFirewall $site1_vnet_hub_azfw_name in $site1_region: $site1_fw_privateIpAddress"
+echo -e "\tFirewall $site2_vnet_hub_azfw_name in $site2_region: $site2_fw_privateIpAddress"
+echo -e "\tClient VM $site1_vm_name in $site1_region: $site1_vm_staticIp"
+echo -e "\tClient VM $site2_vm_name in $site2_region: $site2_vm_staticIp"
+echo -e "\n\nWhen you are ready, the lab can be deleted using this command:"
+echo -e "\taz group delete --name $rgname \\ \n\t  --force-deletion-types Microsoft.Compute/virtualMachines --yes"
+echo -e "\n"
+
+####################
+## End Deployment ##
+####################
