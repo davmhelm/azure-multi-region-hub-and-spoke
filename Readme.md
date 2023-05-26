@@ -36,9 +36,9 @@ Upon complete deployment of the environment, Azure Network Watcher tests are con
 ## Using the lab
 ### Deploy the lab
 
-It is strongly recommended to download the entire lab's contents to a folder where you'll be doing the deployment. All dependencies assume you are in that folder as the current working directory. 
+It is strongly recommended to download the entire lab's contents to a folder where you'll be doing the deployment. All dependencies assume you are in that folder as the current working directory.
 
-You can open [Azure Cloud Shell (bash)](https://shell.azure.com) and run the following commands to build the entire lab.
+You can open [Azure Cloud Shell (**bash**)](https://shell.azure.com) (**not PowerShell**, refer to [instructions on how to set your shell environment](https://learn.microsoft.com/en-us/azure/cloud-shell/quickstart?tabs=azurecli#select-your-shell-environment) if needed). Run the following commands to build the entire lab.
 
 ```bash
 git clone https://github.com/davmhelm/azure-multi-region-hub-and-spoke.git
@@ -46,7 +46,7 @@ cd ./azure-multi-region-hub-and-spoke
 source ./labdeploy.azcli
 ```
 
-**Note:** the provisioning process will take around 20 minutes to complete.
+**Note:** the provisioning process will take 20-30 minutes to complete.
 
 Alternatively (recommended), you can run step-by-step to get familiar with the provisioning process and the components deployed:
 ```bash
@@ -121,6 +121,11 @@ rand1=$(($(($(($RANDOM**2+$RANDOM))%$range))+$lowerbound))
 rand2=$(($(($(($RANDOM**2+$RANDOM))%$range))+$lowerbound))
 site1_storageAccount_name=$storage_prefix$rand1
 site2_storageAccount_name=$storage_prefix$rand2
+
+# Install extensions if they are not present
+echo -n "*** $(date +%T%z) Validating status of necessary Azure CLI extensions (azure-firewall and serial-console)"
+az extension add --name azure-firewall --upgrade --yes
+az extension add --name serial-console --upgrade --yes
 
 # Register features for helpful AzFW logging
 echo -n "*** $(date +%T%z) Validating status of Azure Firewall Structured Logs and TCP Connection Logging features"
