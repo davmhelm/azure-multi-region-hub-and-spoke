@@ -251,7 +251,8 @@ echo -e "\tFirewall $site2_vnet_hub_azfw_name in $site2_region: $site2_fw_privat
 echo -e "\tClient VM $site1_vm_name in $site1_region: $site1_vm_staticIp"
 echo -e "\tClient VM $site2_vm_name in $site2_region: $site2_vm_staticIp"
 echo -e "\n\nWhen you are ready, the lab can be deleted using this command:"
-echo -e "\taz group delete --name $rgname \\ \n\t  --force-deletion-types Microsoft.Compute/virtualMachines --yes"
+echo -e "\taz group delete --name $rgname \\"
+echo -e "\t  --force-deletion-types Microsoft.Compute/virtualMachines --yes"
 echo -e "\n"
 
 ####################
