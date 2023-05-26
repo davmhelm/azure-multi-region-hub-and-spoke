@@ -70,6 +70,11 @@ rand2=$(($(($(($RANDOM**2+$RANDOM))%$range))+$lowerbound))
 site1_storageAccount_name=$storage_prefix$rand1
 site2_storageAccount_name=$storage_prefix$rand2
 
+# Install extensions if they are not present
+echo -n "*** $(date +%T%z) Validating status of necessary Azure CLI extensions (azure-firewall and serial-console)"
+az extension add --name azure-firewall --upgrade --yes
+az extension add --name serial-console --upgrade --yes
+
 # Register features for helpful AzFW logging
 echo -n "*** $(date +%T%z) Validating status of Azure Firewall Structured Logs and TCP Connection Logging features"
 azFwStructuredLogState=$(az feature registration create --name AFWEnableStructuredLogs --namespace Microsoft.Network --query 'properties.state' --output tsv)
